@@ -7,14 +7,13 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::Color,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table},
+    layout::{Constraint, Direction, Layout, Rect, Margin},
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, Paragraph, List, ListItem, Clear},
     Frame, Terminal,
 };
 
-use crate::scanner::DirEntry;
-use crate::state::{AppState, MountInfo};
+use crate::state::AppState;
 
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -23,136 +22,198 @@ fn format_size(bytes: u64) -> String {
     const TB: u64 = GB * 1024;
 
     if bytes >= TB {
-        format!("{:.2} TB", bytes as f64 / TB as f64)
+        format!("{:.1} TB", bytes as f64 / TB as f64)
     } else if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
+        format!("{:.1} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
+        format!("{:.1} MB", bytes as f64 / MB as f64)
     } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
+        format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
     }
 }
 
-fn draw_mount_selector(f: &mut Frame, state: &AppState, area: Rect) {
-    let items: Vec<ListItem> = state
-        .mounts
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let label = format!(
-                "{} {} ({})",
-                if i == state.selected_mount { ">" } else { " " },
-                m.mount_point.to_string_lossy(),
-                format_size(m.total_space)
-            );
-            ListItem::new(label)
-        })
-        .collect();
+const COLOR_PALETTE: [Color; 8] = [
+    Color::Blue,
+    Color::Green,
+    Color::Yellow,
+    Color::Magenta,
+    Color::Cyan,
+    Color::LightBlue,
+    Color::LightGreen,
+    Color::LightYellow,
+];
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Select Drive"))
-        .highlight_style(Color::Cyan);
-
-    f.render_widget(list, area);
-}
-
-fn draw_disk_usage(f: &mut Frame, mount: &MountInfo, area: Rect) {
-    let used_percent = if mount.total_space > 0 {
-        (mount.used_space as f64 / mount.total_space as f64) * 100.0
+fn draw_top_bar(f: &mut Frame, state: &AppState, area: Rect) {
+    let mount = state.get_selected_mount();
+    let used_percent = if let Some(m) = mount {
+        if m.total_space > 0 {
+            (m.used_space as f64 / m.total_space as f64) * 100.0
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
 
-    let bar_width = ((area.width.saturating_sub(2)) as f64 * used_percent / 100.0) as u16;
-    let w = (area.width.saturating_sub(2)) as usize;
-    let bar: String = "█".repeat(bar_width as usize).chars().take(w).collect();
-    let empty: String = "░".repeat(w.saturating_sub(bar_width as usize)).chars().take(w).collect();
+    let bar_width = (area.width as f64 * used_percent / 100.0) as u16;
+    let w = (area.width as usize).saturating_sub(30);
+    let used_bar: String = "█".repeat(bar_width as usize).chars().take(w).collect();
+    let free_bar: String = "░".repeat(w.saturating_sub(bar_width as usize)).chars().take(w).collect();
 
-    let gauge = format!("{}|{} {:5.1}%", bar, empty, used_percent);
-
-    let paragraph = Paragraph::new(gauge)
-        .block(Block::default().borders(Borders::ALL).title("Disk Usage"));
-
-    f.render_widget(paragraph, area);
-}
-
-fn draw_directory_view(f: &mut Frame, state: &AppState, area: Rect) {
-    let entry = match &state.current_entry {
-        Some(e) => e,
-        None => return,
-    };
-
-    let max_items = (area.height as usize).saturating_sub(2);
-    let visible_entries: Vec<&DirEntry> = entry
-        .children
-        .iter()
-        .skip(state.scroll_offset)
-        .take(max_items)
-        .collect();
-
-    let total_size = entry.size;
-    let rows: Vec<Row> = visible_entries
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let percent = if total_size > 0 {
-                (e.size as f64 / total_size as f64 * 100.0) as u64
-            } else {
-                0
-            };
-            let name = e.path.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| e.path.to_string_lossy().to_string());
-            let bar_len = (percent as f64 / 10.0).min(50.0) as usize;
-            let bar = "█".repeat(bar_len);
-            Row::new(vec![
-                format!("{}{}", if state.scroll_offset + i == state.selected_index { ">" } else { " " }, name),
-                format_size(e.size),
-                format!("{}%", percent),
-                bar,
-            ])
-        })
-        .collect();
-
-    if rows.is_empty() {
-        let paragraph = Paragraph::new("No subdirectories")
-            .block(Block::default().borders(Borders::ALL).title(state.current_path.to_string_lossy().to_string()));
-        f.render_widget(paragraph, area);
-        return;
-    }
-
-    let widths = [
-        Constraint::Percentage(30),
-        Constraint::Percentage(15),
-        Constraint::Percentage(10),
-        Constraint::Percentage(45),
-    ];
-
-    let table = Table::new(rows, widths)
-        .block(Block::default().borders(Borders::ALL).title(state.current_path.to_string_lossy().to_string()))
-        .highlight_style(Color::Cyan);
-
-    f.render_widget(table, area);
-}
-
-fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
-    let status = if state.is_scanning {
-        "Scanning...".to_string()
-    } else if let Some(mount) = state.get_selected_mount() {
-        let free = format_size(mount.available_space);
-        let used = format_size(mount.used_space);
-        let total = format_size(mount.total_space);
-        format!("Used: {} | Free: {} | Total: {}", used, free, total)
+    let path_text = state.current_path.to_string_lossy();
+    let status = if let Some(m) = mount {
+        format!(
+            " {} {}{} {} / {} {} ",
+            path_text,
+            used_bar,
+            free_bar,
+            format_size(m.used_space),
+            format_size(m.total_space),
+            if state.is_scanning { "[Scanning...]" } else { "" }
+        )
     } else {
-        "No drive selected".to_string()
+        format!(" {} ", path_text)
     };
 
     let paragraph = Paragraph::new(status)
-        .block(Block::default().borders(Borders::ALL).title("Status"));
+        .style(Style::default().fg(Color::White).bg(Color::Black))
+        .block(Block::default().borders(Borders::BOTTOM));
 
     f.render_widget(paragraph, area);
+}
+
+fn draw_treemap(f: &mut Frame, state: &AppState, area: Rect) {
+    let entry = match &state.current_entry {
+        Some(e) => e,
+        None => {
+            let p = Paragraph::new("Press Enter to scan or / to select drive")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().title(" Treemap ").borders(Borders::ALL));
+            f.render_widget(p, area);
+            return;
+        }
+    };
+
+    if state.treemap_cells.is_empty() {
+        let p = Paragraph::new("No subdirectories found")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().title(" Treemap ").borders(Borders::ALL));
+        f.render_widget(p, area);
+        return;
+    }
+
+    for (i, cell) in state.treemap_cells.iter().enumerate() {
+        let cell_rect = Rect::new(cell.x + 1, cell.y + 1, cell.x + cell.width, cell.y + cell.height);
+
+        if cell_rect.width < 2 || cell_rect.height < 2 {
+            continue;
+        }
+
+        let intersects = area.intersects(cell_rect);
+        if !intersects {
+            continue;
+        }
+
+        let color = COLOR_PALETTE[i % COLOR_PALETTE.len()];
+        let is_selected = i == state.selected_cell_idx;
+
+        let name = cell.path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| cell.path.to_string_lossy().to_string());
+
+        let name_trunc: String = name.chars().take((cell_rect.width as usize).saturating_sub(2)).collect();
+
+        let style = if is_selected {
+            Style::default().fg(color).bg(color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(color).bg(Color::Black)
+        };
+
+        let p = Paragraph::new(format!("{}\n{}", name_trunc, format_size(cell.size)))
+            .style(style)
+            .block(Block::default().borders(if is_selected { Borders::ALL } else { Borders::NONE }));
+
+        f.render_widget(p, cell_rect);
+    }
+}
+
+fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
+    let (selected_name, selected_size, selected_pct) = if let Some(cell) = state.treemap_cells.get(state.selected_cell_idx) {
+        (
+            cell.path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| cell.path.to_string_lossy().to_string()),
+            format_size(cell.size),
+            if let Some(e) = &state.current_entry {
+                if e.size > 0 {
+                    format!("{}%", (cell.size as f64 / e.size as f64 * 100.0) as u32)
+                } else {
+                    "0%".to_string()
+                }
+            } else {
+                "0%".to_string()
+            },
+        )
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+
+    let status = format!(
+        " {} │ {} │ {} │ ↑Enter drill │ /drive ",
+        if selected_name.is_empty() { "-" } else { &selected_name },
+        if selected_size.is_empty() { "-" } else { &selected_size },
+        if selected_pct.is_empty() { "-" } else { &selected_pct }
+    );
+
+    let p = Paragraph::new(status)
+        .style(Style::default().fg(Color::White).bg(Color::Black))
+        .block(Block::default().borders(Borders::TOP));
+
+    f.render_widget(p, area);
+}
+
+fn draw_drive_selector(f: &mut Frame, state: &AppState, area: Rect) {
+    let modal_width = 40u16;
+    let modal_height = (state.mounts.len() as u16 + 4).min(20);
+
+    let modal_x = (area.width - modal_width) / 2;
+    let modal_y = (area.height - modal_height) / 2;
+
+    let modal_rect = Rect::new(modal_x, modal_y, modal_x + modal_width, modal_y + modal_height);
+
+    let clear = Clear;
+    f.render_widget(clear, area);
+
+    let border = Block::default()
+        .borders(Borders::ALL)
+        .title(" Select Drive ")
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Black));
+
+    f.render_widget(border, modal_rect);
+
+    let inner_rect = modal_rect.inner(Margin { horizontal: 1, vertical: 1 });
+
+    let items: Vec<ListItem> = state.mounts.iter().enumerate().map(|(i, m)| {
+        let label = format!(
+            "{} {} ({})",
+            if i == state.selected_mount { ">" } else { " " },
+            m.mount_point.to_string_lossy(),
+            format_size(m.total_space)
+        );
+        ListItem::new(label)
+    }).collect();
+
+    let list = List::new(items)
+        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+    f.render_widget(list, inner_rect);
+
+    let hint = Paragraph::new(" /filter  ↑↓select  Enter:scan  q:quit")
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(hint, Rect::new(modal_x, modal_y + modal_height, modal_x + modal_width, modal_y + modal_height + 1));
 }
 
 pub fn run_app() -> io::Result<()> {
@@ -170,87 +231,109 @@ pub fn run_app() -> io::Result<()> {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
-                    Constraint::Percentage(20),
-                    Constraint::Percentage(60),
-                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Min(3),
+                    Constraint::Length(1),
                 ])
                 .split(f.area());
 
-            if let Some(mount) = state.get_selected_mount() {
-                draw_disk_usage(f, mount, chunks[0]);
+            if !state.show_drive_selector {
+                let area = f.area();
+                state.build_treemap(area.width, area.height.saturating_sub(2));
             }
 
-            draw_mount_selector(f, &state, chunks[1]);
+            draw_top_bar(f, &state, chunks[0]);
+            draw_treemap(f, &state, chunks[1]);
+            draw_status_bar(f, &state, chunks[2]);
 
-            if state.current_entry.is_some() {
-                draw_directory_view(f, &state, chunks[2]);
+            if state.show_drive_selector {
+                draw_drive_selector(f, &state, f.area());
             }
-
-            draw_status_bar(f, &state, chunks[3]);
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                if state.show_drive_selector {
                     match key.code {
                         KeyCode::Char('q') => break,
+                        KeyCode::Char('/') => state.toggle_drive_selector(),
+                        KeyCode::Tab => state.toggle_drive_selector(),
                         KeyCode::Up => {
-                            if state.current_entry.is_some() {
-                                if state.selected_index > 0 {
-                                    state.selected_index -= 1;
-                                    if state.selected_index < state.scroll_offset {
-                                        state.scroll_offset = state.selected_index;
-                                    }
-                                }
-                            } else if state.selected_mount > 0 {
-                                state.select_mount(state.selected_mount - 1);
+                            if state.selected_mount > 0 {
+                                state.selected_mount -= 1;
                             }
                         }
                         KeyCode::Down => {
-                            if let Some(entry) = &state.current_entry {
-                                if state.selected_index < entry.children.len().saturating_sub(1) {
-                                    state.selected_index += 1;
-                                    let max_visible = 18usize;
-                                    if state.selected_index >= state.scroll_offset + max_visible {
-                                        state.scroll_offset = state.selected_index.saturating_sub(max_visible) + 1;
-                                    }
-                                }
-                            } else if state.selected_mount < state.mounts.len() - 1 {
-                                state.select_mount(state.selected_mount + 1);
+                            if state.selected_mount < state.mounts.len() - 1 {
+                                state.selected_mount += 1;
                             }
                         }
                         KeyCode::Enter => {
                             state.is_scanning = true;
-                            if let Some(entry) = &state.current_entry {
-                                if let Some(child) = entry.children.get(state.selected_index) {
-                                    state.current_path = child.path.clone();
-                                    state.selected_index = 0;
-                                    state.scroll_offset = 0;
-                                    let scanned = state.scanner.scan_dir(&child.path, 2);
-                                    state.current_entry = Some(scanned);
-                                }
-                            } else {
-                                state.select_mount(state.selected_mount);
-                                let scanned = state.scanner.scan_dir(&state.root_path, 2);
-                                state.current_entry = Some(scanned);
-                            }
+                            let scan_path = state.mounts[state.selected_mount].mount_point.clone();
+                            let scanned = state.scanner.scan_dir(&scan_path, 2);
+                            state.current_entry = Some(scanned);
+                            state.root_path = scan_path.clone();
+                            state.current_path = scan_path;
                             state.is_scanning = false;
+                            state.show_drive_selector = false;
+                        }
+                        KeyCode::Esc => {
+                            state.show_drive_selector = false;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char('/') => state.toggle_drive_selector(),
+                        KeyCode::Tab => state.toggle_drive_selector(),
+                        KeyCode::Left => {
+                            if state.selected_cell_idx > 0 {
+                                state.selected_cell_idx -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if state.selected_cell_idx < state.treemap_cells.len().saturating_sub(1) {
+                                state.selected_cell_idx += 1;
+                            }
+                        }
+                        KeyCode::Up => {
+                            let cols = (state.treemap_cells.len() as f64 / 4.0).ceil() as usize;
+                            if state.selected_cell_idx >= cols {
+                                state.selected_cell_idx -= cols;
+                            }
+                        }
+                        KeyCode::Down => {
+                            let cols = (state.treemap_cells.len() as f64 / 4.0).ceil() as usize;
+                            if state.selected_cell_idx + cols < state.treemap_cells.len() {
+                                state.selected_cell_idx += cols;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(cell) = state.treemap_cells.get(state.selected_cell_idx) {
+                                state.is_scanning = true;
+                                let scanned = state.scanner.scan_dir(&cell.path, 2);
+                                state.current_path = cell.path.clone();
+                                state.current_entry = Some(scanned);
+                                state.selected_cell_idx = 0;
+                                state.is_scanning = false;
+                            }
                         }
                         KeyCode::Backspace => {
                             if let Some(entry) = &state.current_entry {
                                 if let Some(parent) = entry.path.parent() {
                                     if parent != state.root_path && !parent.to_string_lossy().is_empty() {
                                         state.current_path = parent.to_path_buf();
-                                        state.selected_index = 0;
-                                        state.scroll_offset = 0;
                                         state.is_scanning = true;
                                         let scanned = state.scanner.scan_dir(&parent.to_path_buf(), 2);
                                         state.current_entry = Some(scanned);
+                                        state.selected_cell_idx = 0;
                                         state.is_scanning = false;
-                                    } else {
-                                        state.current_entry = None;
-                                        state.current_path = state.root_path.clone();
                                     }
                                 }
                             }
@@ -260,6 +343,9 @@ pub fn run_app() -> io::Result<()> {
                             let scanned = state.scanner.scan_dir(&state.current_path, 2);
                             state.current_entry = Some(scanned);
                             state.is_scanning = false;
+                        }
+                        KeyCode::Esc => {
+                            state.toggle_drive_selector();
                         }
                         _ => {}
                     }
