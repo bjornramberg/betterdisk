@@ -1,4 +1,5 @@
 # betterdisk
+[![Built With Ratatui](https://img.shields.io/badge/Built_With_Ratatui-000?logo=ratatui&logoColor=fff)](https://ratatui.rs/)
 
 A fast TUI disk space analyzer for Linux written in Rust.
 
